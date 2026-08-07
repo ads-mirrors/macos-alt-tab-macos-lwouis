@@ -199,10 +199,21 @@ class Menubar {
 
     private static var badgeDotLayer: CALayer?
 
+    /// `NSStatusBar.system.thickness`: the status item working area, 22pt on every macOS so far
+    /// (the visible menubar is taller since Tahoe, but items stay in a centred 22pt band).
+    /// The artwork is authored at 44pt. Handed over at that size it makes the button 44pt tall,
+    /// and macOS then draws the selection as a tall block overflowing the strip instead of the pill
+    /// every other menubar app gets. Any size <= 22 avoids that and renders identically, because
+    /// `.scaleProportionallyUpOrDown` below refits the image into the 22pt button either way. 22 is
+    /// the one that stays correct if that scaling mode ever changes: 44pt artwork at 22pt is an
+    /// exact 2:1 downscale, so one artboard unit is one device pixel on a retina display.
+    private static let iconSize = CGFloat(22)
+
     static private func loadPreferredIcon() {
         let i = Preferences.menubarIcon.indexAsString
         let image = NSImage(named: "menubar-\(i)")!
         image.isTemplate = i != "2"
+        image.size = NSSize(width: iconSize, height: iconSize)
         statusItem.button!.image = image
         statusItem.isVisible = true
         statusItem.button!.imageScaling = .scaleProportionallyUpOrDown

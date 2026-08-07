@@ -51,7 +51,7 @@ class Menubar {
         menu.addItem(NSMenuItem.separator())
         addMenuItem(String(format: NSLocalizedString("Quit %@", comment: "%@ is AltTab"), App.name), #selector(NSApplication.terminate(_:)), "q", nil) // "xmark.rectangle" is not necessary; macos automatically recognizes Quit
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.target = self
+        statusItem.button!.target = self
         statusItem.button!.action = #selector(statusItemOnClick)
         statusItem.button!.sendAction(on: [.leftMouseDown, .rightMouseDown])
         // Apply icon prefs eagerly here, while the status item is still being added to the
@@ -148,8 +148,21 @@ class Menubar {
         if let type = NSApp.currentEvent?.type, type != .leftMouseDown {
             App.showUiFromShortcut0()
         } else {
-            statusItem.popUpMenu(Menubar.menu)
+            popUpMenu()
         }
+    }
+
+    /// Replaces `NSStatusItem.popUpStatusItemMenu`, deprecated in 10.14. Neither documented
+    /// alternative works on its own: leaving `statusItem.menu` assigned makes macOS open the menu on
+    /// every click, swallowing the right-click that must show the switcher, and `NSMenu.popUp` puts
+    /// the menu at the wrong place on a status item (it lands over the menubar, offset sideways).
+    /// Assigning the menu only for the duration of a synthesized click keeps the branch above while
+    /// letting AppKit position the menu and highlight the icon. Clearing `menu` on the next line is
+    /// safe because `performClick` doesn't return until menu tracking ends.
+    private static func popUpMenu() {
+        statusItem.menu = menu
+        statusItem.button!.performClick(nil)
+        statusItem.menu = nil
     }
 
     static func menubarIconCallback(_: NSControl?) {

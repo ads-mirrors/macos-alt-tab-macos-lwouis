@@ -49,16 +49,23 @@ class TrackpadEvents {
         CGEvent.tapEnable(tap: detectTap, enable: true)
     }
 
+    /// Called from the main thread (`App.hideUi`), while the detectors it clears are otherwise only ever
+    /// touched from tap callbacks on the input-events thread. Their state includes `GestureTracker`'s
+    /// dictionary, and a `removeAll` racing an insert in a tap callback over-releases its buffer: the
+    /// callback then dereferences freed memory and the app segfaults inside `NonFreshGestureDetector.reset`.
+    /// So we hop to the owning thread rather than lock the input hot path.
     static func reset() {
-        // The session is over, so absorbing is over. Without this the active tap would sit in the stream
-        // until the next trackpad touch re-evaluated it — harmless, but it is exactly the state #5911 is
-        // about, and a session that ends with no finger down is the common case (focus on release).
-        setAbsorbTapEnabled(false)
-        ScrollwheelEvents.toggle(false)
-        NavigationSwipeDetector.reset()
-        NonFreshGestureDetector.reset()
-        // no need to call TriggerSwipeDetector.reset; it does it itself when triggering
-        TriggerSwipeDetector.maxFingersDownDuringTrigger = 0
+        BackgroundWork.keyboardAndMouseAndTrackpadEventsThread?.async {
+            // The session is over, so absorbing is over. Without this the active tap would sit in the stream
+            // until the next trackpad touch re-evaluated it — harmless, but it is exactly the state #5911 is
+            // about, and a session that ends with no finger down is the common case (focus on release).
+            setAbsorbTapEnabled(false)
+            ScrollwheelEvents.toggle(false)
+            NavigationSwipeDetector.reset()
+            NonFreshGestureDetector.reset()
+            // no need to call TriggerSwipeDetector.reset; it does it itself when triggering
+            TriggerSwipeDetector.maxFingersDownDuringTrigger = 0
+        }
     }
 
     private static func observe_() {

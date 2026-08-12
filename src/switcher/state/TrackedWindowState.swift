@@ -290,6 +290,15 @@ struct TrackedWindowState: Equatable {
         var offScreen = Set<CGWindowID>()
         /// per-app activation state for the 808 storm
         var pendingActivationRaises = [pid_t: ActivationEntry]()
+        /// Until when a system re-show is considered in flight, so the OS putting the desktop back does not
+        /// read as the user raising each window (`WindowEventReducer.systemReshowMute`).
+        var systemReshowMuteUntil: TimeInterval = 0
+        /// The previous order-in (815), whatever it was for: the pair that lets the NEXT one tell a lone
+        /// raise from a member of a re-show burst (`WindowEventReducer.reshowBurstGap`). Recorded for
+        /// untracked wids too — a burst sweeps up every window on screen, and one we do not track yet is
+        /// still evidence that this is a burst.
+        var lastOrderInAt: TimeInterval = 0
+        var lastOrderInWid: CGWindowID?
         /// uptime of the most recent `windowCreated`
         var lastWindowCreatedAt: TimeInterval = 0
         /// The wid of that most recent `windowCreated` (the pair to `lastWindowCreatedAt`, exactly as
@@ -651,6 +660,17 @@ struct WsWindowSnapshot: Equatable {
 /// discovery / WS state / the Spaces re-query / an AX liveness probe), or a timer check firing. Each case
 /// carries exactly the OS-reported payload plus the ambient facts the live handler read at that instant
 /// (uptime, app-active, in-Space-transition) — so a recorded debug log can be transcribed input by input.
+/// Which gesture is about to make the OS put the desktop back. They differ only in how far ahead of the
+/// burst they arrive, which is what `WindowEventReducer.systemReshowMute` reads them for.
+enum ReshowSource: Equatable {
+    /// Mission Control / App Exposé / Show Desktop opening (`DockEvents`).
+    case missionControl
+    /// A display added, removed or resized (`ScreensEvents`).
+    case screens
+    /// The display waking or the session unlocking (`SleepWakeEvents` / `ScreenLockEvents`).
+    case wake
+}
+
 enum ReducerInput: Equatable {
     // WindowServer events (raw ids in `WsEventRouting.Notification`)
     case windowCreated(wid: CGWindowID, now: TimeInterval, inSpaceTransition: Bool)          // 811
@@ -666,6 +686,10 @@ enum ReducerInput: Equatable {
     /// NSWorkspace didActivateApplication (no WS equivalent). `altTabTargetWid` = a fresh AltTab-initiated
     /// focus of this app, when known.
     case appActivated(pid: pid_t, now: TimeInterval, altTabTargetWid: CGWindowID?)
+    /// The OS is about to put the whole desktop back, and which gesture it was — because they announce
+    /// themselves at very different distances from the burst they predict, and the mute should be no longer
+    /// than its own trigger needs (`WindowEventReducer.systemReshowMute`).
+    case systemReshow(now: TimeInterval, source: ReshowSource)
 
     // async read results landing
     /// The apply-side of `Applications.addDiscoveredWindow`: acquisition + discrimination ran in the shell;

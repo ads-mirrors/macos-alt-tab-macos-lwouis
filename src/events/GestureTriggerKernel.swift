@@ -129,12 +129,18 @@ final class GestureTriggerKernel {
 
     private let triggerTracker = GestureTracker()
     private let nonFreshTracker = GestureTracker()
-    /// The user already spent this finger-down session on another gesture (a 2-finger scroll, a
-    /// system swipe), so we must not also read it as ours. Prevents 4→3 and 2→3 triggers.
+    /// The user already spent this finger-down session on another gesture, so we must not also read it
+    /// as ours. Only *more* fingers than we want count (a system swipe): that is what prevents a 4→3
+    /// trigger. Fewer fingers deliberately do not — a 2-finger scroll followed by a third finger still
+    /// triggers. Widening this to any non-matching count was tried and reverted: it drags in fingers
+    /// arriving one by one and fingers pausing mid-swipe, which needs per-configuration baselines to
+    /// stay safe, and that complexity buys less than it costs.
     private var userHasDoneAnotherGesture = false
-    /// False once the fingers wandered too far across the swipe's axis. Note the entry guard in
-    /// `swipeCompleted` reads this before anything can recompute it, so it is a latch by design: it
-    /// stays false for the rest of the gesture. Everything that ends a gesture must clear it.
+    /// False once the fingers wandered too far across the swipe's axis. The entry guard in
+    /// `swipeCompleted` reads this before anything can recompute it, so it is a latch by design, and
+    /// its scope is the whole finger-down session: only raising the fingers clears it. A finger merely
+    /// pausing must NOT, or a long off-axis wander is forgiven mid-gesture and the swipe that follows
+    /// triggers (see `rebaseTrigger` vs `resetTrigger`).
     private var swipeStillPossible = true
 
     /// Feed one gesture event. Only call this while the switcher is closed; once it is open,
@@ -154,7 +160,9 @@ final class GestureTriggerKernel {
         }
         if hasDoneAnotherGesture(frame) { return .ignore }
         if frame.activeTouches.count != frame.requiredFingers {
-            resetTrigger()
+            // Only the start positions go: a finger arriving or pausing means the next measurement has
+            // to start from here, but it is not a fresh gesture and must not forgive an off-axis wander.
+            rebaseTrigger()
             return .ignore
         }
         return swipeCompleted(frame) ? .trigger : .ignore
@@ -183,23 +191,30 @@ final class GestureTriggerKernel {
             && swipeStillPossible && maxFingersDownDuringTrigger == 0
     }
 
-    private func resetTrigger() {
+    /// Forget where the fingers were, but keep the verdict on this finger-down session.
+    private func rebaseTrigger() {
         triggerTracker.reset()
+    }
+
+    private func resetTrigger() {
+        rebaseTrigger()
         swipeStillPossible = true
     }
 
     /// Once the user has used this finger-down session for another gesture, the session is ours no
-    /// more, until every finger is raised.
+    /// more, until the fingers are raised. See `userHasDoneAnotherGesture` for why only extra fingers
+    /// count here.
     private func hasDoneAnotherGesture(_ frame: Frame) -> Bool {
         guard !userHasDoneAnotherGesture else { return true }
+        let count = frame.activeTouches.count
         let isNew = nonFreshTracker.isNewGesture(frame.activeTouches)
-        guard frame.activeTouches.count > frame.requiredFingers, !isNew else { return false }
+        guard count > frame.requiredFingers, !isNew else { return false }
         let distances = nonFreshTracker.distances(frame.activeTouches)
         userHasDoneAnotherGesture = distances.contains {
             abs($0.x) >= Self.minSwipeDistance || abs($0.y) >= Self.minSwipeDistance
         }
         if userHasDoneAnotherGesture {
-            Logger.debug { "another gesture claimed these \(frame.activeTouches.count) fingers" }
+            Logger.debug { "\(count) travelling fingers claimed this session (we want \(frame.requiredFingers))" }
         }
         return userHasDoneAnotherGesture
     }

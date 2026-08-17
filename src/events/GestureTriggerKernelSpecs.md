@@ -40,6 +40,31 @@ work"* (a stale start position offsets the measurement, so extra travel can stil
 threshold) and *"sometimes it recovers"* (a 2-finger scroll trips the `requiredFingers` mismatch
 branch, which was the one path that did reset the trigger).
 
+## Leniency about reusing fingers (found in live testing, 2026-08-17)
+
+Both of these predate the extraction; the pure kernel is just where they became visible and testable.
+
+**A long off-axis wander was forgiven mid-gesture.** Swipe up and down repeatedly, then horizontally,
+and the switcher triggered. `swipeStillPossible` is meant to hold until the fingers are raised, but the
+"wrong finger count" branch called a reset that cleared it along with the start positions — and that
+branch is hit constantly, because a single finger pausing takes `activeTouches.count` off
+`requiredFingers`. Split into `rebaseTrigger` (start positions only, for a pause) and `resetTrigger`
+(also the verdict, only when the gesture ends).
+
+## Accepted leniency: fewer fingers than wanted do not spend the session
+
+`userHasDoneAnotherGesture` latches only on **more** active fingers than `requiredFingers`, which is
+what prevents a 4→3 trigger. The mirror case is deliberately not covered: with a 3-finger gesture, a
+2-finger scroll followed by a third finger does trigger the switcher, and the comment that used to sit
+here claiming otherwise ("prevents 2->3 trigger") was aspirational.
+
+Widening the condition to `count != requiredFingers` was implemented and **reverted** on 2026-08-17.
+It works, but it is not safe on its own: fingers never land on the same event, so a 3-finger gesture
+passes through 1 and 2 active fingers on the way in, and a finger pausing mid-swipe drops the count
+again. Keeping that from spending the gesture's own session needs a per-configuration travel baseline,
+and the whole apparatus buys less than it costs. `testFingersArrivingOneByOneStillTrigger` is the guard
+that keeps the simple rule honest.
+
 ## Fixes
 
 1. `GestureTracker.prune(toTouchesDown:)` drops start positions for fingers that are no longer on the
@@ -62,11 +87,13 @@ Per event, while the switcher is closed:
 2. **`fingersDown <= 1`** — at most one finger is pointer mode, not a gesture. The gesture is over:
    reset everything, ignore. (Guarded so it costs nothing on the many events where state is already
    clean.)
-3. **Another gesture claimed these fingers** — if more than `requiredFingers` are active and any of
-   them has travelled `minSwipeDistance`, the user is scrolling or doing a system swipe. Latches until
-   the fingers are raised, which prevents 4→3 and 2→3 triggers. Ignore.
-4. **Wrong finger count** — `activeTouches.count != requiredFingers`: reset the trigger, ignore. This
-   is also the branch that used to be the accidental cure for the latch.
+3. **Another gesture claimed these fingers** — if *more* than `requiredFingers` are active and any of
+   them has travelled `minSwipeDistance`, the user is doing a system swipe. Latches until the fingers
+   are raised, which prevents a 4→3 trigger. Fewer fingers deliberately don't latch; see the section
+   above. Ignore.
+4. **Wrong finger count** — `activeTouches.count != requiredFingers`: *re-base* the trigger (start
+   positions only) and ignore. This branch was the accidental cure for the #5137 latch, and it was also
+   forgiving off-axis wanders; it must not clear any verdict about the session.
 5. **The swipe itself** — needs `swipeStillPossible`, a gesture already under way (the first frame
    only records start positions), a non-empty set of readable distances, every touch within
    `maxSwipeDistanceInWrongDirection` across the axis, and every touch past `minSwipeDistance` along
@@ -123,3 +150,13 @@ Mirrors `GestureTriggerKernelTests.swift` 1:1.
 - **testMaxFingersDownIsRecordedDuringTheTrigger** — four active fingers plus a resting thumb → 5.
 - **testMaxFingersDownIsClearedWhenTheGestureEnds** — it describes one trigger, so a stale value must
   not leak into the next gesture and make the switcher focus a finger too early.
+
+### F. A gesture must not inherit a spent session
+- **testOffAxisWanderIsNotForgivenByAFingerPausing** — wander 0.25 off-axis, let one finger pause for
+  one event, then swipe cleanly along the axis → still ignored. Reported from live testing; the pause
+  used to reset the off-axis cancel.
+- **testFingersArrivingOneByOneStillTrigger** — fingers land over several events, so 1 then 2 then 3
+  active must not spend the session on the way in. This is what makes "only more fingers than we want
+  claim the session" safe, and why the stricter `!=` variant was reverted.
+- **testFingerPausingMidSwipeOnlyRestartsTheMeasurement** — the line between the two things a pause may
+  do: it re-bases the measurement (so travel must be fresh from there) but never spends the session.

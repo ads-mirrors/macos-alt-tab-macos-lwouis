@@ -7,7 +7,8 @@ import XCTest
 ///
 /// Groups: A `GestureTracker` identity handling (recycled identities, the root cause) ·
 /// B the `swipeStillPossible` latch (the reason it never recovered) · C triggering ·
-/// D "another gesture claimed these fingers" · E `maxFingersDownDuringTrigger`.
+/// D "another gesture claimed these fingers" · E `maxFingersDownDuringTrigger` · F a gesture must not
+/// inherit a spent session.
 final class GestureTriggerKernelTests: XCTestCase {
 
     // MARK: - Helpers
@@ -235,5 +236,49 @@ final class GestureTriggerKernelTests: XCTestCase {
         XCTAssertEqual(kernel.handle(frame(moved(Self.fourFingers, x: 0.55, y: 0.5), fingersDown: 5, down: Set(ids))), .trigger)
         XCTAssertEqual(kernel.handle(liftFrame), .ignore)
         XCTAssertEqual(kernel.maxFingersDownDuringTrigger, 0)
+    }
+
+    // MARK: - F. A gesture must start clean, not inherit a spent session
+
+    /// Reported after the #5137 fix, and present long before it: a long vertical wander followed by a
+    /// horizontal swipe used to trigger, because any event where a finger paused took
+    /// `activeTouches.count` off `requiredFingers`, and that branch reset `swipeStillPossible` along
+    /// with the start positions. The off-axis cancel is scoped to the finger-down session, so only
+    /// raising the fingers may clear it.
+    func testOffAxisWanderIsNotForgivenByAFingerPausing() {
+        let kernel = GestureTriggerKernel()
+        land(kernel)
+        XCTAssertEqual(kernel.handle(frame(moved(Self.fourFingers, x: 0.5, y: 0.75))), .ignore) // cancelled
+        // one finger goes stationary for a single event: still down, just not active
+        XCTAssertEqual(kernel.handle(frame(moved(["A", "B", "C"], x: 0.5, y: 0.75), down: Set(Self.fourFingers))), .ignore)
+        // and now a clean horizontal swipe, fingers never lifted
+        XCTAssertEqual(kernel.handle(frame(moved(Self.fourFingers, x: 0.5, y: 0.75))), .ignore)
+        XCTAssertEqual(kernel.handle(frame(moved(Self.fourFingers, x: 0.7, y: 0.75))), .ignore)
+    }
+
+    /// Fingers never land on the same event, so a 3-finger gesture passes through 1 and 2 active
+    /// fingers on the way in. None of that may spend the session it belongs to. This is the guard that
+    /// makes "only *more* fingers than we want claim the session" the safe rule, and the reason the
+    /// stricter `!=` version was reverted.
+    func testFingersArrivingOneByOneStillTrigger() {
+        let kernel = GestureTriggerKernel()
+        XCTAssertEqual(kernel.handle(frame(began(["A"], x: 0.5, y: 0.5), required: 3)), .ignore)
+        XCTAssertEqual(kernel.handle(frame(began(["B"], x: 0.5, y: 0.5) + moved(["A"], x: 0.51, y: 0.5), required: 3)), .ignore)
+        XCTAssertEqual(kernel.handle(frame(began(["C"], x: 0.5, y: 0.5) + moved(["A", "B"], x: 0.52, y: 0.5), required: 3)), .ignore)
+        XCTAssertEqual(kernel.handle(frame(moved(["A", "B", "C"], x: 0.56, y: 0.5), required: 3)), .trigger)
+    }
+
+    /// The line between the two things a pause may do. A finger
+    /// pausing mid-swipe must not *spend* the session — the swipe can still trigger. What it does do is
+    /// restart the measurement, so the travel has to be fresh from the pause onward. That is
+    /// long-standing behaviour and it is the strict side of the trade, so it is pinned here rather than
+    /// removed: `minSwipeDistance` is 1.5% of the trackpad, so in the hand it costs a little more travel.
+    func testFingerPausingMidSwipeOnlyRestartsTheMeasurement() {
+        let kernel = GestureTriggerKernel()
+        land(kernel, required: 3)
+        XCTAssertEqual(kernel.handle(frame(moved(["A", "B"], x: 0.53, y: 0.5), down: ["A", "B", "C"], required: 3)), .ignore)
+        // measurement re-bases here, rather than counting the 0.03 travelled before the pause
+        XCTAssertEqual(kernel.handle(frame(moved(["A", "B", "C"], x: 0.56, y: 0.5), required: 3)), .ignore)
+        XCTAssertEqual(kernel.handle(frame(moved(["A", "B", "C"], x: 0.60, y: 0.5), required: 3)), .trigger)
     }
 }

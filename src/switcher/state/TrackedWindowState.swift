@@ -705,8 +705,25 @@ enum ReducerInput: Equatable {
     /// A batched WS state query landed (`Applications.updateWindowStatesViaWindowServer`).
     case windowServerStateRead([WsWindowSnapshot])
     /// The off-main Spaces re-query landed (`Applications.syncSpacesState`): the authoritative per-window
-    /// Space map, plus whether the topology snapshot changed anything.
-    case spacesSynced(windowToSpaces: [CGWindowID: [UInt64]], topologyChanged: Bool)
+    /// Space map, the wids it actually ASKED about, plus whether the topology snapshot changed anything.
+    ///
+    /// `queried` is what makes an absent wid readable. The map is built off-main from the tracked list as it
+    /// stood when the pass STARTED, and applied when it lands, so "absent" conflates two opposite facts: CGS
+    /// answered "no Space" for a wid we asked about (evidence — the strong phantom signal, and what retires a
+    /// group's dead members), and a wid that entered the model mid-flight and was never asked about at all
+    /// (silence). Applying the second as the first wiped the Space a brand-new window's own discovery had
+    /// just queried, hiding it until the next pass. Only `queried` wids are applied; the rest keep what they
+    /// have.
+    ///
+    /// `placedByWindowServer` names the wids the pass could not place but the WindowServer says ARE on a
+    /// Space — a contradiction between two OS reads, and the one case where an empty answer is not evidence.
+    /// It exists because CGS answers a non-NULL EMPTY array for a wid it has no record of (measured: 0, 1,
+    /// 999999, UINT32_MAX), so "this window is on no Space" and "there is no such window" are the same value
+    /// coming back. Such a window keeps the last membership CGS itself reported, which beats both wiping it
+    /// (hidden with no recovery path, #5954) and inventing a Space for it (a fabricated fact other rules read
+    /// as truth). Empty for every window in the ordinary case.
+    case spacesSynced(windowToSpaces: [CGWindowID: [UInt64]], queried: Set<CGWindowID>,
+                      placedByWindowServer: Set<CGWindowID>, topologyChanged: Bool)
     /// An AX `kAXFocusedWindow` read landed — the two focus signals that arrive as a READ rather than as a
     /// WindowServer event. `viaActivationBackstop`: an activation that emitted no 808
     /// (`WindowServerEvents.bumpFocusOnActivation`), else a window discovered while its app was already

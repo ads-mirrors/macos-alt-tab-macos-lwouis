@@ -191,8 +191,9 @@ enum WindowEventReducer {
             return axFocusedWindowRead(&state, wid: wid, viaActivationBackstop: viaActivationBackstop)
         case .windowServerStateRead(let snapshots):
             return windowServerStateRead(&state, snapshots)
-        case .spacesSynced(let windowToSpaces, let topologyChanged):
-            return spacesSynced(&state, windowToSpaces: windowToSpaces, topologyChanged: topologyChanged)
+        case .spacesSynced(let windowToSpaces, let queried, let placedByWindowServer, let topologyChanged):
+            return spacesSynced(&state, windowToSpaces: windowToSpaces, queried: queried,
+                placedByWindowServer: placedByWindowServer, topologyChanged: topologyChanged)
         case .livenessConfirmedDead(let wid):
             // A CLOSE the OS confirmed twice: the cached element died AND the app no longer lists the wid
             // among its windows (`removeIfClosedAfterOrderOut`, which keeps the window on a stale-ref-only
@@ -1148,14 +1149,38 @@ enum WindowEventReducer {
         return effects
     }
 
-    /// The off-main Spaces re-query landed (the apply-side of `Applications.syncSpacesState`): backfill
-    /// every tracked window's Space membership from the authoritative map, then regroup if anything moved.
+    /// The off-main Spaces re-query landed (the apply-side of `Applications.syncSpacesState`): backfill the
+    /// Space membership of every window the query ASKED about, then regroup if anything moved.
+    ///
+    /// Windows outside `queried` are skipped, and that is the whole point of the parameter: they entered the
+    /// model after the pass captured its wid list, so this answer says nothing about them (see the input's
+    /// doc). Applying `[]` to them anyway asserted "CGS places this window nowhere" about a window nobody had
+    /// asked about — the strong phantom signal — so a window discovered during the off-main query was hidden
+    /// despite its own discovery having just read its Space correctly.
+    ///
+    /// UNLESS the map places it anyway, in which case we hold an answer and it would be daft to drop it. The
+    /// map is NOT built from `queried`: `Spaces.query` enumerates every Space and takes whatever windows CGS
+    /// lists (the same call the summon's discovery sweep reads), so a window appended mid-flight usually IS in
+    /// it, and it is the fresher fact — a discovery whose own per-window query came back empty leaves the
+    /// window on `Window.init`'s current-Space GUESS, which is wrong the moment the window is on another
+    /// Space. Only SILENCE is ambiguous; an answer is an answer whoever it was asked for.
     private static func spacesSynced(_ state: inout TrackedWindowState, windowToSpaces: [CGWindowID: [UInt64]],
+                                     queried: Set<CGWindowID>, placedByWindowServer: Set<CGWindowID>,
                                      topologyChanged: Bool) -> [ReducerEffect] {
         var effects = [ReducerEffect]()
         var changed = topologyChanged
         for w in state.windows {
-            guard let wid = w.wid else { continue }
+            guard let wid = w.wid, queried.contains(wid) || windowToSpaces[wid] != nil else { continue }
+            // Two OS reads disagree: CGS named no Space for this wid, the WindowServer says it is on one.
+            // An empty CGS answer is also what a wid it has never heard of returns, so on its own it cannot
+            // carry the weight the strong phantom signal puts on it. Keep the last membership CGS itself
+            // reported — stale at worst, and the window stays reachable instead of disappearing with no way
+            // back (#5954). The wids the WindowServer does NOT know fall through and are wiped as before;
+            // those are the corpses, and `discardDeadPhantomWindows` removes them outright.
+            if windowToSpaces[wid] == nil, placedByWindowServer.contains(wid) {
+                effects.append(.log("spacesSync keepPlaced #\(wid) sp\(w.spaceIds) (WindowServer places it, CGS named none)"))
+                continue
+            }
             let r = state.applyWindowSpaces(wid, spaceIds: windowToSpaces[wid] ?? [])
             effects.append(.updateScreenId(wid))
             if r.unphantomedRealWindow { effects.append(.removeWindowlessPlaceholder(pid: w.pid)) }
